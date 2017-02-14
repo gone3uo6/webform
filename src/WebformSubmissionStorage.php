@@ -2,11 +2,20 @@
 
 namespace Drupal\webform;
 
+use Drupal\Core\Cache\CacheableMetadata;
+use Drupal\Core\Cache\CacheBackendInterface;
+use Drupal\Core\Database\Connection;
+use Drupal\Core\Entity\EntityManagerInterface;
+use Drupal\Core\Entity\EntityTypeInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Serialization\Yaml;
 use Drupal\Core\Database\Database;
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Entity\Sql\SqlContentEntityStorage;
 use Drupal\Core\Session\AccountInterface;
+use Drupal\Core\Session\AccountProxyInterface;
+use Drupal\user\UserInterface;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
  * Defines the webform submission storage.
@@ -19,6 +28,33 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
    * @var array
    */
   protected $elementDataSchema = [];
+
+  /**
+   * Account proxy.
+   *
+   * @var \Drupal\Core\Session\AccountProxyInterface
+   */
+  protected $accountProxy;
+
+  public static function createInstance(ContainerInterface $container, EntityTypeInterface $entity_type) {
+    return new static(
+      $entity_type,
+      $container->get('database'),
+      $container->get('entity.manager'),
+      $container->get('cache.entity'),
+      $container->get('language_manager'),
+      $container->get('current_user')
+    );
+  }
+
+  /**
+   * WebformSubmissionStorage constructor.
+   */
+  public function __construct(EntityTypeInterface $entity_type, Connection $database, EntityManagerInterface $entity_manager, CacheBackendInterface $cache, LanguageManagerInterface $language_manager, AccountProxyInterface $account_proxy) {
+    parent::__construct($entity_type, $database, $entity_manager, $cache, $language_manager);
+
+    $this->accountProxy = $account_proxy;
+  }
 
   /**
    * {@inheritdoc}
@@ -61,6 +97,22 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
     $query->condition('in_draft', TRUE);
     $query->condition('webform_id', $webform->id());
     $query->condition('uid', $account->id());
+    if ($account->isAnonymous()) {
+      // Anonymous drafts are additionally filtered by the token column.
+      $is_current_account = $account->id() == $this->accountProxy->id();
+      if (!$is_current_account) {
+        // We cannot clearly identify an anonymous user when it's not current
+        // one since we need session for anonymous user identification.
+        return NULL;
+      }
+
+      $drafts = $this->getAccountDraftTokens();
+      if (empty($drafts)) {
+        // This guy hasn't saved any draft.
+        return NULL;
+      }
+      $query->condition('token', $drafts, 'IN');
+    }
     if ($source_entity) {
       $query->condition('entity_type', $source_entity->getEntityTypeId());
       $query->condition('entity_id', $source_entity->id());
@@ -74,6 +126,38 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
     }
     else {
       return NULL;
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function draftCacheabilityMetadata() {
+    // Since we store anonymous draft tokens in session, we must vary by it.
+    $cache = new CacheableMetadata();
+    $cache->addCacheContexts(['session']);
+    return $cache;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function accountLoggedIn(UserInterface $account) {
+    $draft_tokens = $this->getAccountDraftTokens();
+
+    // Move all anonymous drafts to UID of this account.
+    if (!empty($draft_tokens)) {
+      $query = $this->getQuery();
+      $query->condition('token', $draft_tokens, 'IN');
+      $query->condition('in_draft', 1);
+      $query->condition('uid', 0);
+      $ids = array_values($query->execute());
+      if (!empty($ids)) {
+        foreach ($this->loadMultiple($ids) as $webform_submission) {
+          $webform_submission->setOwner($account);
+          $webform_submission->save();
+        }
+      }
     }
   }
 
@@ -507,6 +591,12 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
     foreach ($entities as $entity) {
       $this->invokeWebformElements('postLoad', $entity);
       $this->invokeWebformHandlers('postLoad', $entity);
+
+      // If this is an anonymous draft, it must vary by our caching meta data
+      // for drafts.
+      if ($entity->isDraft() && $entity->getOwner()->isAnonymous()) {
+        $entity->addCacheableDependency($this->draftCacheabilityMetadata());
+      }
     }
     return $return;
   }
@@ -519,6 +609,15 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
     $id = parent::doPreSave($entity);
     $this->invokeWebformElements('preSave', $entity);
     $this->invokeWebformHandlers('preSave', $entity);
+
+    // We watch out for privacy: if the submission owner UID does not match the
+    // current user, then we cannot work on current user's private temp storage
+    // since apparently it is another user. Probably it's an programmatic
+    // submission or god knows what.
+    if ($entity->getOwnerId() == $this->accountProxy->id() && $entity->isDraft() && $entity->getOwner()->isAnonymous()) {
+      $this->addAccountDraft($entity);
+    }
+
     return $id;
   }
 
@@ -862,6 +961,38 @@ class WebformSubmissionStorage extends SqlContentEntityStorage implements Webfor
     $this->database->delete('webform_submission_data')
       ->condition('sid', $sids, 'IN')
       ->execute();
+  }
+
+  /**
+   * Retrieve a list of webform submission tokens of a current account.
+   *
+   * We use session for storing draft tokens. So we can only do it for the
+   * current user.
+   *
+   * We do not use PrivateTempStore because it utilizes session ID as the key in
+   * key-value hash map where it stores its data. During user login the session
+   * ID is regenerated (see user_login_finalize()) so it is not suitable for us
+   * since we need to "carry" the draft tokens from anonymous session to the
+   * logged in one. See self::accountLoggedIn() for additional details.
+   *
+   * @return string[]
+   *   Array of draft tokens of the provided account
+   */
+  protected function getAccountDraftTokens() {
+    return isset($_SESSION['webform']['draft_tokens']) ? $_SESSION['webform']['draft_tokens'] : [];
+  }
+
+  /**
+   * Add webform submission as a draft for the current account.
+   *
+   * @param \Drupal\webform\WebformSubmissionInterface $webform_submission
+   *   Webform submission to add as a draft of the current account
+   */
+  protected function addAccountDraft(WebformSubmissionInterface $webform_submission) {
+    if (!isset($_SESSION['webform']['draft_tokens'])) {
+      $_SESSION['webform']['draft_tokens'] = [];
+    }
+    $_SESSION['webform']['draft_tokens'][] = $webform_submission->getToken();
   }
 
 }

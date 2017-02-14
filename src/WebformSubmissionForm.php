@@ -184,6 +184,12 @@ class WebformSubmissionForm extends ContentEntityForm {
     // Add this webform and the webform settings to the cache tags.
     $form['#cache']['tags'][] = 'config:webform.settings';
 
+    if ($this->draftEnabled()) {
+      // If drafts enabled, we must also consider the caching metadata of draft
+      // storage.
+      \Drupal::service('renderer')->addCacheableDependency($form, $this->storage->draftCacheabilityMetadata());
+    }
+
     // Add the webform as a cacheable dependency.
     \Drupal::service('renderer')->addCacheableDependency($form, $this->getWebform());
 
@@ -1381,8 +1387,23 @@ class WebformSubmissionForm extends ContentEntityForm {
    *   TRUE if drafts are enabled.
    */
   protected function draftEnabled() {
-    $account = $this->currentUser();
-    return ($account->isAuthenticated() && $this->getWebformSetting('draft') && !$this->getWebformSetting('results_disabled')) ? TRUE : FALSE;
+    if ($this->getWebformSetting('results_disabled')) {
+      return FALSE;
+    }
+
+    switch ($this->getWebformSetting('draft')) {
+      case WebformInterface::DRAFT_ENABLED_ALL:
+        return TRUE;
+
+      case WebformInterface::DRAFT_ENABLED_AUTHENTICATED:
+        /** @var WebformSubmissionInterface $webform_submission */
+        $webform_submission = $this->getEntity();
+        return $webform_submission->getOwner()->isAuthenticated();
+
+      case WebformInterface::DRAFT_ENABLED_NONE:
+      default:
+        return FALSE;
+    }
   }
 
   /**

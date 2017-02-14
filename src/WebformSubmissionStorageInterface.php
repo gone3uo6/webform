@@ -2,9 +2,11 @@
 
 namespace Drupal\webform;
 
+use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Entity\ContentEntityStorageInterface;
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Session\AccountInterface;
+use Drupal\user\UserInterface;
 
 /**
  * Defines an interface for webform submission classes.
@@ -116,6 +118,23 @@ interface WebformSubmissionStorageInterface extends ContentEntityStorageInterfac
    *   A webform submission.
    */
   public function loadDraft(WebformInterface $webform, EntityInterface $source_entity = NULL, AccountInterface $account = NULL);
+
+  /**
+   * Generate cache metadata that accompanies submission drafts.
+   *
+   * @return CacheableMetadata
+   *   Cache metadata that describes how drafts are cached in the submission
+   *   storage
+   */
+  public function draftCacheabilityMetadata();
+
+  /**
+   * React to an event when a user logs in.
+   *
+   * @param \Drupal\user\UserInterface $account
+   *   Account that has just logged in
+   */
+  public function accountLoggedIn(UserInterface $account);
 
   /**
    * Get the total number of submissions.

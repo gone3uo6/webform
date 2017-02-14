@@ -12,6 +12,7 @@ use Drupal\Core\Render\Element;
 use Drupal\system\Entity\Action;
 use Drupal\webform\Entity\Webform;
 use Drupal\webform\Plugin\WebformElement\ManagedFile;
+use Drupal\webform\WebformInterface;
 
 /**
  * Implements hook_uninstall().
@@ -529,4 +530,17 @@ function webform_update_8017() {
 function webform_update_8018() {
   _webform_update_admin_settings();
   _webform_update_form_settings();
+}
+
+/**
+ * Issue #2838423: Drafts for anonymous users.
+ */
+function webform_update_8019() {
+  $config_factory = \Drupal::configFactory();
+  foreach ($config_factory->listAll('webform.webform.') as $webform_config_name) {
+    $webform_config = $config_factory->getEditable($webform_config_name);
+    $data = $webform_config->getRawData();
+    $data['settings']['draft'] = ($data['settings']['draft'] == TRUE) ? WebformInterface::DRAFT_ENABLED_AUTHENTICATED : WebformInterface::DRAFT_ENABLED_NONE;
+    $webform_config->setData($data)->save();
+  }
 }
