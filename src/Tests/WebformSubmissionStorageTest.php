@@ -5,6 +5,7 @@ namespace Drupal\webform\Tests;
 use Drupal\Core\Serialization\Yaml;
 use Drupal\webform\Entity\Webform;
 use Drupal\webform\Entity\WebformSubmission;
+use Drupal\webform\WebformInterface;
 
 /**
  * Tests for webform storage tests.
@@ -94,7 +95,7 @@ class WebformSubmissionStorageTest extends WebformTestBase {
     $this->drupalLogout();
 
     // Enable the saving of drafts.
-    $webform->setSetting('draft', TRUE)->save();
+    $webform->setSetting('draft', WebformInterface::DRAFT_ENABLED_AUTHENTICATED)->save();
 
     // Create drafts for user1 and user2.
     $this->drupalLogin($user1);
